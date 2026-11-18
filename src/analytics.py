@@ -1,46 +1,163 @@
-def portfel_icmali(portfel: list[dict]) -> dict:
+import csv
+from pathlib import Path
+
+try:
+    from market import canli_qiymet_al
+    from storage import (
+        bronlanmis_miqdar_al,
+        emrleri_yukle,
+        menfeet_hesabla,
+        planlanan_satislari_icra_et,
+        portfeli_yukle,
+    )
+except ImportError:
+    from src.market import canli_qiymet_al
+    from src.storage import (
+        bronlanmis_miqdar_al,
+        emrleri_yukle,
+        menfeet_hesabla,
+        planlanan_satislari_icra_et,
+        portfeli_yukle,
+    )
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR / "data"
+HESABAT_FAYLI = DATA_DIR / "portfel_hesabati.csv"
+
+
+def canli_qiymetleri_topla(portfel: list[dict]) -> dict[str, float]:
+    """Portfeldəki və PENDING əmrlərdəki bütün simvollar üçün canlı qiymətləri çəkir."""
+    simvollar = {a.get("simvol", "").upper() for a in portfel if a.get("simvol")}
+    for emr in emrleri_yukle():
+        if emr.get("status") == "PENDING" and emr.get("simvol"):
+            simvollar.add(emr["simvol"].upper())
+
+    qiymetler: dict[str, float] = {}
+    for simvol in simvollar:
+        qiymet = canli_qiymet_al(simvol)
+        if qiymet is not None:
+            qiymetler[simvol] = qiymet
+    return qiymetler
+
+
+def portfel_analizi_et(portfel: list[dict]) -> dict:
+    """Əvvəlcə limit satış əmrlərini yoxlayır, sonra yenilənmiş portfelin analizini aparır."""
+    qiymetler = canli_qiymetleri_topla(portfel)
+    icra_edilen_emrler = planlanan_satislari_icra_et(qiymetler)
+
+    if icra_edilen_emrler:
+        portfel = portfeli_yukle()
+
+    setirler = []
     umumi_maya = 0.0
-    umumi_deyer = 0.0
+    umumi_cari_deyer = 0.0
 
     for aktiv in portfel:
-        umumi_maya += aktiv["alis_qiymeti"] * aktiv["miqdar"]
-        umumi_deyer += aktiv["cari_qiymet"] * aktiv["miqdar"]
+        simvol = aktiv.get("simvol", "N/A").upper()
+        miqdar = float(aktiv.get("miqdar", 0.0))
+        alis_qiymeti = float(aktiv.get("alis_qiymeti", 0.0))
+        alis_tarixi = aktiv.get("alis_tarixi", "Qeyd edilməyib")
+        bronlanmis = bronlanmis_miqdar_al(simvol)
+        serbest = round(max(0.0, miqdar - bronlanmis), 6)
 
-    xalis_menfeet = umumi_deyer - umumi_maya
+        if simvol in qiymetler:
+            cari_qiymet = qiymetler[simvol]
+            qiymet_menbeyi = "Canlı"
+        else:
+            cari_qiymet = alis_qiymeti
+            qiymet_menbeyi = "Alış (Oflayn)"
 
-    if umumi_maya > 0:
-        menfeet_faizi = (xalis_menfeet / umumi_maya) * 100
-    else:
-        menfeet_faizi = 0.0
+        maya, cari_deyer, menfeet, menfeet_faiz = menfeet_hesabla(
+            miqdar, alis_qiymeti, cari_qiymet
+        )
+
+        umumi_maya += maya
+        umumi_cari_deyer += cari_deyer
+
+        setirler.append(
+            {
+                "simvol": simvol,
+                "miqdar": miqdar,
+                "serbest_miqdar": serbest,
+                "bronlanmis_miqdar": bronlanmis,
+                "alis_tarixi": alis_tarixi,
+                "alis_qiymeti": alis_qiymeti,
+                "cari_qiymet": cari_qiymet,
+                "qiymet_menbeyi": qiymet_menbeyi,
+                "maya": maya,
+                "cari_deyer": cari_deyer,
+                "menfeet": menfeet,
+                "menfeet_faiz": menfeet_faiz,
+                "pay_faizi": 0.0,
+            }
+        )
+
+    risk_xeberdarliqlari = []
+    for s in setirler:
+        if umumi_cari_deyer > 0:
+            pay = round((s["cari_deyer"] / umumi_cari_deyer) * 100, 2)
+        else:
+            pay = 0.0
+        s["pay_faizi"] = pay
+
+        if pay > 50.0:
+            risk_xeberdarliqlari.append(
+                f"DİQQƏT: {s['simvol']} portfelin {pay}%-ni təşkil edir (50% limitini aşır)!"
+            )
+
+    umumi_maya = round(umumi_maya, 2)
+    umumi_cari_deyer = round(umumi_cari_deyer, 2)
+    umumi_menfeet = round(umumi_cari_deyer - umumi_maya, 2)
+    umumi_menfeet_faiz = (
+        round((umumi_menfeet / umumi_maya) * 100, 2) if umumi_maya > 0 else 0.0
+    )
 
     return {
-        "umumi_maya": round(umumi_maya, 2),
-        "umumi_deyer": round(umumi_deyer, 2),
-        "xalis_menfeet": round(xalis_menfeet, 2),
-        "menfeet_faizi": round(menfeet_faizi, 2)
+        "setirler": setirler,
+        "umumi_maya": umumi_maya,
+        "umumi_cari_deyer": umumi_cari_deyer,
+        "umumi_menfeet": umumi_menfeet,
+        "umumi_menfeet_faiz": umumi_menfeet_faiz,
+        "risk_xeberdarliqlari": risk_xeberdarliqlari,
+        "icra_edilen_emrler": icra_edilen_emrler,
     }
 
-def risk_analizi(portfel: list[dict], maksimum_ceki_faizi: float = 50.0) -> list[dict]:
-    umumi_deyer = portfel_icmali(portfel)["umumi_deyer"]
-    if umumi_deyer <= 0:
-        return []
-    riskli_aktivler = []
-    for aktiv in portfel:
-        aktiv_deyeri = aktiv["cari_qiymet"] * aktiv["miqdar"]
-        ceki_faizi = (aktiv_deyeri / umumi_deyer) * 100
-        if ceki_faizi > maksimum_ceki_faizi:
-            riskli_aktivler.append({
-                "simvol": aktiv["simvol"],
-                "ceki_faizi": round(ceki_faizi, 2),
-                "limit": maksimum_ceki_faizi
-            })
-    return riskli_aktivler
 
-if __name__ == "__main__":
-    test_portfel = [
-        {"simvol": "BTC", "alis_qiymeti": 60000.0, "cari_qiymet": 65000.0, "miqdar": 0.5},  # Dəyəri: 32,500
-        {"simvol": "NVDA", "alis_qiymeti": 120.0, "cari_qiymet": 135.5, "miqdar": 10.0}  # Dəyəri: 1,355
+def csv_ixrac_et(analiz: dict) -> Path:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    basliqlar = [
+        "Simvol",
+        "Ümumi Miqdar",
+        "Sərbəst Miqdar",
+        "Bronlanmış Miqdar",
+        "Alış Tarixi",
+        "Alış Qiyməti ($)",
+        "Cari Qiymət ($)",
+        "Maya Dəyəri ($)",
+        "Cari Dəyər ($)",
+        "Mənfəət/Zərər ($)",
+        "Mənfəət/Zərər (%)",
+        "Portfel Payı (%)",
     ]
-    print("Portfel icmalı:", portfel_icmali(test_portfel))
-    print("Risk auditi:", risk_analizi(test_portfel))
-    print("Boş portfel auditi:", risk_analizi([]))
+
+    with open(HESABAT_FAYLI, "w", newline="", encoding="utf-8-sig") as f:
+        yazici = csv.writer(f)
+        yazici.writerow(basliqlar)
+        for s in analiz["setirler"]:
+            yazici.writerow(
+                [
+                    s["simvol"],
+                    s["miqdar"],
+                    s["serbest_miqdar"],
+                    s["bronlanmis_miqdar"],
+                    s["alis_tarixi"],
+                    s["alis_qiymeti"],
+                    s["cari_qiymet"],
+                    s["maya"],
+                    s["cari_deyer"],
+                    s["menfeet"],
+                    s["menfeet_faiz"],
+                    s["pay_faizi"],
+                ]
+            )
+    return HESABAT_FAYLI

@@ -1,1 +1,1 @@
-yfinance
+# Zero external dependencies — uses Python 3.10+ standard library only.
