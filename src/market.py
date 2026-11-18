@@ -24,7 +24,7 @@ def canli_qiymet_al(simvol: str) -> float | None:
             if not melumat.empty:
                 son_qiymet = float(melumat["Close"].iloc[-1])
                 return round(son_qiymet, 2)
-        except Exception:
+        except (OSError, KeyError, ValueError, IndexError, TypeError):
             continue
 
     return None
